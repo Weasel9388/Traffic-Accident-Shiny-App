@@ -1,0 +1,159 @@
+library(shiny)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(leaflet)
+library(maps)
+library(plotly)
+
+# Read the accident dataset
+accident_data <- read_csv("accident.csv")
+
+# Clean and prepare the dataset
+clean_data <- function(data) {
+  data %>%
+    filter(HOUR >= 0 & HOUR <= 23) %>%
+    mutate(HOUR = as.integer(HOUR),
+           LONGITUD = as.numeric(LONGITUD),
+           LATITUDE = as.numeric(LATITUDE)) %>%
+    filter(!is.na(LONGITUD) & !is.na(LATITUDE))
+}
+
+accident_data <- clean_data(accident_data)
+
+# Load US states map data
+us_states <- maps::map("state", fill = TRUE, plot = FALSE)
+
+# UI
+ui <- navbarPage(
+  "Accident Analysis",
+  
+  tabPanel("Hourly Analysis",
+    sidebarLayout(
+      sidebarPanel(
+        selectInput("state", "Select State:",
+                    choices = c("All", sort(unique(as.character(accident_data$STATENAME)))),
+                    selected = "All"),
+        selectInput("weather", "Select Weather Condition:",
+                    choices = c("All", sort(unique(as.character(accident_data$WEATHERNAME)))),
+                    selected = "All"),
+        selectInput("routetype", "Select Route Type:",
+                    choices = c("All", sort(unique(as.character(accident_data$ROUTENAME)))),
+                    selected = "All"),
+        selectInput("harm_evname", "Select Harm Event Name:",
+                    choices = c("All", sort(unique(as.character(accident_data$HARM_EVNAME)))),
+                    selected = "All"),
+        selectInput("rur_urbname", "Select Rural/Urban Name:",
+                    choices = c("All", sort(unique(as.character(accident_data$RUR_URBNAME)))),
+                    selected = "All")
+      ),
+      mainPanel(
+        plotlyOutput("hourlyPlot")  # Use plotlyOutput for interactive plots
+      )
+    )
+  ),
+  
+  tabPanel("Route Analysis",
+    fluidPage(
+      titlePanel("Accident Analysis"),  # Title matching Hourly Analysis
+      leafletOutput("route_map", height = "600px")  # Increased height for the map
+    )
+  )
+)
+
+# Server
+server <- function(input, output, session) {
+  
+  # Reactive expression to filter data based on selections
+  filtered_data <- reactive({
+    data <- accident_data
+    
+    if (input$state != "All") {
+      data <- data %>% filter(STATENAME == input$state)
+    }
+    
+    if (input$weather != "All") {
+      data <- data %>% filter(WEATHERNAME == input$weather)
+    }
+    
+    if (input$routetype != "All") {
+      data <- data %>% filter(ROUTENAME == input$routetype)
+    }
+    
+    if (input$harm_evname != "All") {
+      data <- data %>% filter(HARM_EVNAME == input$harm_evname)
+    }
+    
+    if (input$rur_urbname != "All") {
+      data <- data %>% filter(RUR_URBNAME == input$rur_urbname)
+    }
+    
+    data
+  })
+  
+  # Render hourly plot
+  output$hourlyPlot <- renderPlotly({
+    data <- filtered_data() %>%
+      group_by(HOUR) %>%
+      summarise(count = n(), .groups = 'drop')
+    
+    req(nrow(data) > 0)
+    
+    # Create a lollipop plot using ggplot2
+    p <- ggplot(data, aes(x = factor(HOUR), y = count)) +
+      geom_segment(aes(xend = factor(HOUR), yend = 0), color = "lightblue") +
+      geom_point(size = 4, color = "steelblue") +
+      labs(x = "Hour of Day", y = "Number of Accidents") +
+      theme_minimal() +
+      ggtitle(paste("Accidents by Hour:",
+                    if(input$state != "All") input$state else "All States",
+                    "-",
+                    if(input$weather != "All") input$weather else "All Weather Conditions",
+                    "-",
+                    if(input$routetype != "All") input$routetype else "All Route Types",
+                    "-",
+                    if(input$harm_evname != "All") input$harm_evname else "All Harm Events",
+                    "-",
+                    if(input$rur_urbname != "All") input$rur_urbname else "All Areas"))
+    
+    # Convert ggplot to plotly object for interactivity
+    ggplotly(p)
+  })
+  
+  # Render route map based on filtered data from Hourly Analysis
+  output$route_map <- renderLeaflet({
+    req(input$state) # Ensure that at least a state is selected
+    
+    map <- leaflet(data = us_states) %>%
+      addTiles() %>%
+      setView(lng = -98.5795, lat = 39.8283, zoom = 4)
+    
+    route_data <- filtered_data()
+    
+    # Group by state and summarize accident counts
+    state_data <- route_data %>%
+      group_by(STATENAME) %>%
+      summarise(count = n(), 
+                avg_long = mean(LONGITUD, na.rm = TRUE),
+                avg_lat = mean(LATITUDE, na.rm = TRUE),
+                .groups = 'drop')
+    
+    if (nrow(state_data) > 0) {
+      map <- map %>%
+        addCircleMarkers(
+          data = state_data,
+          lng = ~avg_long,
+          lat = ~avg_lat,
+          radius = ~sqrt(count) * 0.5,  # Scale down the radius by a factor (e.g., 0.5)
+          popup = ~paste(STATENAME, "<br>Accidents:", count),
+          color = "red",
+          fillOpacity = 0.7
+        )
+    }
+    
+    map
+  })
+}
+
+# Run the app
+shinyApp(ui = ui, server = server)
